@@ -85,7 +85,8 @@ flowchart TD
 - **Dual audio recording** — App audio ([CATapDescription](https://developer.apple.com/documentation/coreaudio/catap)) + microphone simultaneously
 - **On-device transcription** — Two engines, selectable in Settings:
   - [WhisperKit](https://github.com/argmaxinc/WhisperKit) — 99+ languages, ~1 GB model
-  - [Parakeet TDT v3](https://github.com/FluidInference/FluidAudio) (NVIDIA) — 25 EU languages, ~50 MB model, ~10× faster, custom vocabulary support (CTC boosting)
+  - [Parakeet TDT v3](https://github.com/FluidInference/FluidAudio) (NVIDIA) — 25 EU languages, ~50 MB model, ~10× faster
+- **Custom vocabulary** — Shared term list boosted via Parakeet CTC rescoring, or via an experimental WhisperKit decoder-prompt toggle; a separate opt-in "canonical terminology" pass rewrites spelling variants after transcription, independent of engine
 - **On-device speaker diarization** — [FluidAudio](https://github.com/FluidInference/FluidAudio) via CoreML/ANE — no HuggingFace token needed; two modes: standard (`OfflineDiarizer`) and overlap-aware (`Sortformer`)
 - **Dual-track diarization** — App and mic tracks diarized separately for clean speaker separation without echo interference
 - **Speaker recognition** — Voice embeddings stored across meetings, matched via cosine similarity

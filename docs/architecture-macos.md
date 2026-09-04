@@ -12,7 +12,7 @@ Native SwiftUI menu bar application that orchestrates meeting detection, recordi
 
 ```
                 ┌──────────────────────────────────────────────────┐
-                │           MeetingTranscriberApp (@main)          │
+                │      AppLauncher (@main) → MeetingTranscriberApp  │
                 │   SwiftUI: MenuBarExtra + Settings + Naming      │
                 └──────────────────────────┬───────────────────────┘
                                            │ owns
@@ -87,7 +87,8 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 
 | File | Role |
 |------|------|
-| `MeetingTranscriberApp.swift` | `@main` UI shell — SwiftUI scenes, windows, NSOpenPanel, NSWorkspace. Observes `.showSettings` / `.closeSettings` / `.showSpeakerNaming` notifications for RPC- and pipeline-driven scene control |
+| `AppLauncher.swift` | `@main` process entry point — the one pre-launch decision (divert into the `--localvqe-selftest` probe or start the GUI) before `MeetingTranscriberApp`/`AppState` are constructed |
+| `MeetingTranscriberApp.swift` | UI shell (not `@main` — see `AppLauncher`) — SwiftUI scenes, windows, NSOpenPanel, NSWorkspace. Observes `.showSettings` / `.closeSettings` / `.showSpeakerNaming` notifications for RPC- and pipeline-driven scene control |
 | `AppState.swift` | `@Observable @MainActor` composition root — wires the concern controllers (`engines`, `watching`, `pipeline`, `permissions`, `channelHealth`, `liveTranscription`, `rpcController`) and exposes the derived UI state (badge, status label) rather than owning it |
 | `MenuBarView.swift` | Menu bar dropdown (state, actions, meeting info) |
 | `MenuBarIcon.swift` | Renders the animated waveform icon + badge overlays (permission, record-only, channel-silent) |
@@ -110,6 +111,8 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `VoiceEnrollmentView.swift` | Voice enrollment sheet — seeds `speakers.json` from an existing audio file |
 | `AppSettings.swift` | `@Observable` settings persisted to UserDefaults |
 | `AppSettings+Computed.swift` | Values derived from stored `AppSettings` toggles, split out to keep `AppSettings.swift` under the line cap |
+| `AppSettings+Vocabulary.swift` | Security-scoped custom-vocabulary file handling (bookmark resolution, validation) — split out of `AppSettings.swift` |
+| `AppSettings+OutputDirectory.swift` | Everything derived from the `customOutputDirBookmark` security-scoped bookmark, split out of `AppSettings.swift` |
 | `LegacyDefaultsMigration.swift` | One-shot carry-over of settings from the pre-rename bundle identifier, since `UserDefaults` is scoped per identifier |
 | `UpdateChecker.swift` | Checks GitHub releases for newer versions, drives the menu bar update badge |
 | `Settings/PickerLanguages.swift` | Language picker entries for WhisperKit and Parakeet language selectors |
@@ -126,10 +129,16 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `WatchLoopEndPolicy.swift` | Pure decision logic for `waitForMeetingEnd` (grace-period / max-duration) |
 | `WatchLoopState.swift` | Value-type snapshot of `WatchLoop`'s observable fields (for tests and RPC) |
 | `ManualRecordingMonitorPolicy.swift` | Pure decision logic for manual recording stop conditions (process-died vs max-duration) |
+| `WatchLoop+ManualRecording.swift` | The poll loop that decides when a manually started recording ends, split out of `WatchLoop` |
+| `ManualRecordingInfo.swift` | Info about a manually started recording session, as opposed to one a detector started |
+| `ManualRecordingRequest.swift` | What the user asked `WatchingController` to record by hand — carries the app-picker vs. mic-only distinction through one shared start path |
+| `AppPickerStartState.swift` | Whether the app picker can start a recording, and if not, why (no selection vs. one already running) |
+| `MicrophoneRecordingAvailability.swift` | Whether the menu bar's "Record Microphone" item can start a recording, and if not, why — mirrors `AppPickerStartState` |
 | `MeetingDetecting.swift` | `MeetingDetecting` protocol + `DetectedMeeting` model |
 | `MeetingDetector.swift` | Window title polling, pattern matching, confirmation counting, cooldown |
 | `MeetingTitleMatcher.swift` | Compiled idle/meeting title regex semantics for one `AppMeetingPattern` |
 | `PowerAssertionDetector.swift` | IOKit power assertion–based meeting detection (sandbox-safe); carries the Chrome WebRTC pattern for browser meetings (issue #503) |
+| `PowerAssertionDetector+Diagnostics.swift` | The "we saw something that looks like a meeting and did not act on it" diagnostic, split out of `PowerAssertionDetector` |
 | `MicInputDetector.swift` | Third `MeetingDetecting` strategy: watches which processes hold `kAudioProcessPropertyIsRunningInput` via the Core Audio process-object API — covers call apps (WeChat, Tencent Meeting, FaceTime, WhatsApp) with no reliable power-assertion signal; each app opt-in and off by default |
 | `MeetingPatterns.swift` | Regex patterns for Teams, Zoom, Webex, browser (Chrome WebRTC) |
 | `BrowserConsentPolicy.swift` | Pure decision logic for the browser-meeting "ask before recording" prompt — decline cooldown (issue #503) |
@@ -137,18 +146,31 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `BrowserConsentReadiness.swift` | Whether a browser-meeting consent prompt can actually reach the user — polls `NotificationVisibility` since the prompt is itself a notification and a broken notification channel can't report its own brokenness |
 | `ConsentPromptCoordinator.swift` | Coordinates an async yes/no recording-consent prompt: register pending decision by id, resolve once via answer or timeout |
 | `WatchLoop+Consent.swift` | Browser-meeting consent gate, split out of `WatchLoop`; only patterns with `requiresRecordingConsent` reach it |
+| `ConsentDenyList.swift` | Apps the user answered "Never for this app" about, so the browser-meeting consent prompt stops asking for good (issue #503 follow-up) |
 | `DualSourceRecorder.swift` | Orchestrates AudioTapLib capture + mic, mixes tracks |
+| `DualSourceRecorder+BuildRecording.swift` | Turns a finished capture session into the files the pipeline consumes, split out of `DualSourceRecorder` |
+| `AudioCapturing.swift` | The consumer's view of `AudioCaptureSession` — the part of it one recording drives |
+| `RecordingSource.swift` | What a single recording captures (app tap, mic, or both) — replaces the old `(appPID, noMic)` pair, which had no way to express "mic only" (issue #633) |
 | `RecordingProvider.swift` | Protocol abstraction over `DualSourceRecorder` for mock injection in `WatchLoop` tests |
 | `WatchLoop+RecordOnly.swift` | Record-only output branch (moves WAVs + writes `RecordingSidecar`), split out of `WatchLoop` |
 | `AudioPersistencePolicy.swift` | Decides per finished-job source file whether to relocate it into the output folder or leave it in place (staging-dir recording vs. user-picked import) |
 | `TranscribingEngine.swift` | `TranscribingEngine` protocol + `mergeDualSourceSegments` default impl |
 | `WhisperKitEngine.swift` | WhisperKit transcription engine (99+ languages, ~1 GB model) |
-| `ParakeetEngine.swift` | NVIDIA Parakeet TDT v3 via FluidAudio (25 EU languages, ~50 MB, ~10× faster) |
+| `WhisperDecodingClient.swift` | The narrow decode boundary used by `WhisperKitEngine` — production forwards to WhisperKit, tests capture the exact options without loading a CoreML model |
+| `WhisperVocabularyPrompt.swift` | Converts the shared custom-vocabulary file into a bounded WhisperKit decoder prompt (experimental, opt-in — see Architecture Notes) |
+| `ParakeetEngine.swift` | NVIDIA Parakeet TDT v3 via FluidAudio (25 EU languages, ~50 MB, ~10× faster); CTC-boosts the shared custom-vocabulary file |
 | `ParakeetTokenGrouping.swift` | Pure token-grouping logic extracted from `ParakeetEngine` (testable) |
+| `ParakeetVocabularyConfiguration.swift` | Immutable identity of a Parakeet vocabulary configuration (path + file revision) |
+| `VocabularyFileAccess.swift` | Resolves persisted sandbox access for the custom-vocabulary file and brackets each read with the matching security scope |
+| `TerminologyNormalizer.swift` | Opt-in canonical-spelling rewrite pass applied after ASR, independent of engine or vocabulary boosting (`Canonical => variant` rule syntax) |
 | `StreamingTranscriber.swift` | Per-channel live transcription actor (FluidVAD streaming → `engine.transcribeSamples` → partial/final captions) |
 | `PipelineQueue.swift` | Decouples recording from post-processing, sequential job pipeline |
 | `PipelineQueue+Stages.swift` | Per-stage job processing (transcribe → diarize → naming → protocol), split out of `PipelineQueue` (line-cap) |
 | `PipelineQueue+Recovery.swift` | Snapshot restore and orphaned-recording recovery for `PipelineQueue` |
+| `PipelineQueue+EchoBleed.swift` | Warns when a dual-source recording carries the same speech on both tracks (loudspeaker bleeding into the mic); wires `EchoBleedDetector` into the transcribe stage |
+| `EchoBleedDetector.swift` | Pure decision type: per-10s-window envelope correlation → `.notMeasured` / `.clean` / `.affected` verdict (see Critical/Architecture Notes for the full method) |
+| `EchoSegmentClassifier.swift` | Per-microphone-segment decision, on an affected recording, whether the app track explains the segment's energy (`.echoOnly`) or someone spoke (`.mixed`/`.ownVoice`) — feeds transcript dedup |
+| `EchoEmbeddingQuarantine.swift` | Holds a mic track's speaker embeddings back from `speakers.json` on an echo-affected recording, since `SpeakerMatcher` folds a confirmed embedding into its centroid permanently |
 | `PipelineJob.swift` | Pipeline job model (waiting → transcribing → diarizing → generatingProtocol → done) |
 | `PipelineSnapshot.swift` | Pure I/O helpers for persisting `PipelineQueue` jobs to disk (atomic rename) |
 | `PipelineEventLog.swift` | Append-only JSONL log of `PipelineQueue` job state transitions |
@@ -176,6 +198,9 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `EngineController.swift` | `@Observable @MainActor` engine selection + model lifecycle controller (language/vocabulary sync, preload) |
 | `PipelineController.swift` | `@Observable` controller owning `PipelineQueue` lifecycle (wired by `AppState`) |
 | `WatchingController.swift` | `@Observable` controller owning `WatchLoop` lifecycle (wired by `AppState`) |
+| `WatchingController+WatchControl.swift` | The `/v1/watch` control surface: meeting watching as an idempotent resource a remote caller can drive |
+| `WatchingController+RecordControl.swift` | The `/v1/record` control surface: microphone recording as an idempotent resource a remote caller can drive |
+| `WatchingController+Detectors.swift` | Which detection strategies auto-watch runs, and how the "Apps to Watch" toggles filter them |
 | `WavHeaderRepair.swift` | Repairs unfinalized WAV files from crash-interrupted recordings (RIFF/data chunk size fix) |
 | `FluidDiarizer.swift` | On-device speaker diarization via FluidAudio CoreML/ANE |
 | `FluidDiarizer+SortformerEmbeddings.swift` | Post-hoc WeSpeaker embedding extraction for Sortformer mode — overlap-excluded masks feed `SpeakerMatcher` (DiariZen-style hybrid) |
@@ -192,6 +217,7 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `SilentRecordingMonitor.swift` | Pure state machine detecting fully-silent recordings (both channels below threshold) |
 | `ChannelHealthMonitor.swift` | Pure state machine for per-channel asymmetric silence detection (one channel live, other dead) |
 | `ChannelHealthController.swift` | `@Observable` controller polling channel dBFS levels and driving `ChannelHealthMonitor` |
+| `ChannelFaultMonitor.swift` | Decides whether a capture channel has stopped delivering (no buffers / digital silence / gave up) from buffer ages rather than a polled level — backs the per-channel notification, distinct from `ChannelHealthMonitor`'s level-based tint |
 | `PairedImportPanelDelegate.swift` | `NSOpenPanel` delegate + accessory view for paired dual-source file import |
 | `PairedRecordingResolver.swift` | Groups recording URLs into dual-source groups (app + mic pairs, singletons) for reimport |
 
@@ -200,6 +226,11 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | File | Role |
 |------|------|
 | `AudioMixer.swift` | Resampling, mixing, echo suppression, mute masking, WAV I/O |
+| `EchoCancelling.swift` | Abstraction seam for acoustic echo cancellation (removing far-end bleed from the mic track before transcription) — not wired into the pipeline yet; concrete implementation is `LocalVQECanceller` |
+| `LocalVQECanceller.swift` | `EchoCancelling` implementation over the vendored LocalVQE static library — owns the C context lifecycle and drives the streaming frame API hop by hop |
+| `LocalVQEModel.swift` | Resolves the bundled LocalVQE AEC model by filename convention (`localvqe-*.gguf`); refuses to fall back silently when an override names a missing file |
+| `LocalVQESelftest.swift` | Hidden `--localvqe-selftest` CLI probe verifying the static library resolves its compute backend from a signed `.app` bundle; driven by `scripts/localvqe-bundle-check.sh`, not part of a normal launch |
+| `EchoFrameChunking.swift` | Pure hop arithmetic for streaming a signal through LocalVQE's fixed 256-sample-hop frame API |
 | `AudioConstants.swift` | Shared audio pipeline constants (target sample rate) |
 | `FFmpegHelper.swift` | ffmpeg CLI detection + 16 kHz mono WAV conversion fallback for file-import formats AVAsset can't decode |
 | `MicRecorder.swift` | Microphone recording via AVAudioEngine |
@@ -228,6 +259,7 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `tools/audiotap/Sources/Helpers.swift` | `machTicksToSeconds`, `getDefaultOutputDeviceUID`, `writeAllToFileHandle` |
 | `tools/audiotap/Sources/MicRestartPolicy.swift` | Pure decision logic for mic engine restart on device change |
 | `tools/audiotap/Sources/CaptureRestartRetryPolicy.swift` | Retry/backoff policy for a failed capture restart, shared by both the app-audio and mic channels (issue #379) |
+| `tools/audiotap/Sources/ChannelSignalAges.swift` | How long ago a channel last delivered any buffer, and last delivered one carrying signal — recorded where buffers pass through rather than derived from a polled level, feeds `ChannelFaultMonitor` |
 | `tools/audiotap/Sources/RestartArbiter.swift` | Bounds how long a *single* restart attempt may run — generation-tagged so a wedged attempt that eventually returns is rejected rather than adopted, and forbids output-file creation forever once timed out (issue #588) |
 | `tools/audiotap/Sources/OutputDeviceChangeCoordinator.swift` | State machine for output device change + tap restart flow |
 | `tools/audiotap/Sources/ProcessTreeEnumerator.swift` | Enumerates all PIDs under an `.app` bundle (Electron/Teams child-process support) |
@@ -252,6 +284,7 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `AppPaths.swift` | Centralized path constants (ipcDir, dataDir, logSubsystem, speakersDB) |
 | `AXHelper.swift` | Shared accessibility API helper (MuteDetector + ParticipantReader) |
 | `NotificationManager.swift` | macOS notifications |
+| `NotificationUrgency.swift` | Whether a notification may break through a Focus mode — two cases, not the full `UNNotificationInterruptionLevel` range |
 | `NotificationScheduling.swift` | Port over the `UNUserNotificationCenter` slice `NotificationManager` uses, so posting/registration is testable against a fake scheduler |
 | `NotificationRingBuffer.swift` | Bounded, thread-safe log of recently-posted notifications (`#if !APPSTORE`) |
 | `DateFormatter+FilenameStamp.swift` | `DateFormatter` pinned to Gregorian calendar + POSIX locale for filename timestamp stamps |
@@ -263,7 +296,7 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `NotificationVisibility.swift` | What the notification centre will actually *do* with a posted notification (alert style, Time Sensitive, scheduled delivery) — authorisation alone can read `.authorized` while the prompt never shows |
 | `ParticipantReader.swift` | Teams participant extraction via Accessibility API |
 | `DebugRPCServer.swift` | Embedded HTTP RPC server core (routing, auth) for shell-driven inspection. `#if !APPSTORE`, opt-in via `MEETINGTRANSCRIBER_DEBUG_RPC=1`. Bearer-token + Origin reject; binds 127.0.0.1 only. Endpoint handlers split into companion files below (line-cap) |
-| `DebugRPCServer+V1.swift` | `/v1` versioned automation API routing + response envelopes (`POST /v1/transcribe`, `/v1/jobs`, naming) |
+| `DebugRPCServer+V1.swift` | `/v1` versioned automation API routing + response envelopes (`POST /v1/transcribe`, `/v1/jobs`, naming, `/v1/watch`, `/v1/record`) |
 | `DebugRPCServer+Metrics.swift` | `GET /metrics` handler — cumulative CPU/RAM/instruction counters via `proc_pid_rusage` |
 | `DebugRPCServer+Screenshot.swift` | `GET /screenshot` handler (PNG of the largest visible window via ScreenCaptureKit) |
 | `DebugRPCServer+UITree.swift` | `GET /ui/tree` handler — read-only accessibility tree of an allowlisted window |
@@ -277,6 +310,8 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 | `RPCResourceMetrics.swift` | JSON-serializable resource-usage snapshot of the running process, backs `GET /metrics` |
 | `JobStatusDTO.swift` | Wire + persisted shape for `GET /v1/jobs/<id>` (live or terminal job status + result paths) |
 | `NamingStatusDTO.swift` | Wire shape for `GET /v1/jobs/<id>/naming` — per-speaker auto-name suggestion + speaking time + participants |
+| `WatchStatusDTO.swift` | Wire shape for `GET`/`POST /v1/watch` — the meeting-watching lifecycle as a small, stable projection, deliberately apart from the `/state` kitchen sink |
+| `RecordStatusDTO.swift` | Wire shape for `GET`/`POST /v1/record` — the microphone-recording lifecycle as a small, stable projection, built alongside `WatchStatusDTO` |
 | `IdempotencyStore.swift` | Bounded FIFO map of `Idempotency-Key` → created job IDs for the `/v1` enqueue routes |
 | `TerminalJobStore.swift` | File-backed store of recent finished-job statuses (survives queue reaping + app restart) |
 | `AppSettings+RPC.swift` | Builds the read-only settings projection for the debug RPC `/state` endpoint |
@@ -295,7 +330,7 @@ State writes to `AppPaths.dataDir`; IPC + queue snapshots to `ipcDir`.
 
 | Path | Role |
 |------|------|
-| `tools/mt-cli/` | Thin Swift client for `DebugRPCServer`. Subcommands: `state`, `healthz`, `screenshot`, `open-settings`, `close-settings`, `confirm-browser-consent`, `wav-verdict`, `seed-speaker`, `rename-speaker`, `delete-speaker`, `merge-speakers`, `ui-tree`, `ui-press`. Reads token from `~/Library/Application Support/MeetingTranscriber/.rpc-token`. Skill doc at `tools/mt-cli/skill.md`. |
+| `tools/mt-cli/` | Thin Swift client for `DebugRPCServer`. Subcommands: `state`, `healthz`, `screenshot`, `open-settings`, `close-settings`, `confirm-browser-consent`, `wav-verdict`, `seed-speaker`, `rename-speaker`, `delete-speaker`, `merge-speakers`, `ui-tree`, `ui-press`, `watch`, `record`. Reads token from `~/Library/Application Support/MeetingTranscriber/.rpc-token`. Skill doc at `tools/mt-cli/skill.md`. |
 | `tools/meeting-simulator/` | Test fixture: spawns a fake meeting window for E2E detection tests |
 
 ---
@@ -604,7 +639,7 @@ AppSettings (UserDefaults)
 | LiveCaptionsGate.strategy | Pure static function — call directly with any input combination, no controller needed |
 | AppNotifying | `notifier` parameter in `AppState.init` (`SilentNotifier` default, `RecordingNotifier` in tests) |
 | BadgeKind.compute | Pure static function — call directly with any input combination, no WatchLoop needed |
-| DebugRPCServer | Out-of-process inspection via HTTP. Debug endpoints: `GET /state /healthz /metrics /screenshot`, `POST /action/openSettings /action/closeSettings`. Versioned automation API under `/v1` (`POST /v1/transcribe`, `POST /v1/jobs`, `GET /v1/jobs/<id>`, `GET`/`POST /v1/jobs/<id>/naming`, `POST /v1/jobs/<id>/naming/skip`); see `docs/automation-api.md`. `#if !APPSTORE` + env-gated. `boundPort` exposes OS-assigned port for in-process integration tests. `tools/mt-cli/` is the matching inspection CLI. `scripts/test_rpc.sh` is a live smoketest (build + launch + drive + assert). |
+| DebugRPCServer | Out-of-process inspection via HTTP. Debug endpoints: `GET /state /healthz /metrics /screenshot`, `POST /action/openSettings /action/closeSettings`. Versioned automation API under `/v1` (`POST /v1/transcribe`, `POST /v1/jobs`, `GET /v1/jobs/<id>`, `GET`/`POST /v1/jobs/<id>/naming`, `POST /v1/jobs/<id>/naming/skip`, `GET`/`POST /v1/watch`, `GET`/`POST /v1/record`); see `docs/automation-api.md`. `#if !APPSTORE` + env-gated. `boundPort` exposes OS-assigned port for in-process integration tests. `tools/mt-cli/` is the matching inspection CLI. `scripts/test_rpc.sh` is a live smoketest (build + launch + drive + assert). |
 
 ---
 
@@ -643,7 +678,7 @@ The overlay lives over the *currently active* animation (idle, recording, transc
 |---|---|---|---|
 | **General** | Apps to Watch · Detection · Updates | `settings`, `updateChecker?` | — |
 | **Audio** | Microphone · VAD | `settings` | `audioDevices` |
-| **Transcription** | Engine + per-engine options + status | `settings`, three engines | — |
+| **Transcription** | Engine + per-engine options + status | `settings`, both engines | — |
 | **Speakers** | Diarization · Speaker Identity · Known Voices · Recognition Stats · Experimental Diarization Tuning | `settings`, `recognitionStatsLog`, `enrollmentDiarizerFactory` | `knownVoicesSheet` |
 | **Output** | LLM Provider · Protocol Language · Output Folder · Prompt | `settings` | `claudeBinaries` (#if !APPSTORE), connection-test state, `availableModels`, `hasCustomPrompt` |
 | **Advanced** | Permissions · Diagnostics · About | — | `micPermission`, `screenRecordingOK`, `accessibilityOK` |
@@ -660,6 +695,7 @@ The overlay lives over the *currently active* animation (idle, recording, transc
 **Cross-cutting concerns owned by sub-views:**
 - `OutputSettingsView` owns OpenAI-endpoint connection testing (`testConnection()`) and custom-prompt I/O (`openCustomPrompt`, `importCustomPrompt`, reset confirmation)
 - `AdvancedSettingsView` owns permission live-probing (`refreshPermissions()`) and version/build/ffmpeg status
+- `TranscriptionSettingsView` owns custom-vocabulary file selection/validation and canonical-terminology rule editing, shared across both engines
 
 ---
 
