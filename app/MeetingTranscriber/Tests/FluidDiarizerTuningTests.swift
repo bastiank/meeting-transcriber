@@ -108,9 +108,9 @@ final class FluidDiarizerTuningTests: XCTestCase {
 
     func testPreparePassesNonMetalConfigurationToFluidAudio() async throws {
         var receivedComputeUnits: [MLComputeUnits] = []
-        var processor = FluidOfflineProcessor(prepareModels: { _, configuration in
+        var processor = FluidOfflineProcessor { _, configuration in
             receivedComputeUnits.append(configuration.computeUnits)
-        })
+        }
 
         try await processor.prepare(numSpeakers: nil)
 
