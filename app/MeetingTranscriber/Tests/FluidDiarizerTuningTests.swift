@@ -106,9 +106,14 @@ final class FluidDiarizerTuningTests: XCTestCase {
         XCTAssertNil(negative.clustering.maxSpeakers)
     }
 
-    func testModelConfigurationAvoidsMetalInference() {
-        let configuration = FluidOfflineProcessor.makeModelConfiguration()
+    func testPreparePassesNonMetalConfigurationToFluidAudio() async throws {
+        var receivedComputeUnits: [MLComputeUnits] = []
+        var processor = FluidOfflineProcessor(prepareModels: { _, configuration in
+            receivedComputeUnits.append(configuration.computeUnits)
+        })
 
-        XCTAssertEqual(configuration.computeUnits, MLComputeUnits.cpuAndNeuralEngine)
+        try await processor.prepare(numSpeakers: nil)
+
+        XCTAssertEqual(receivedComputeUnits, [.cpuAndNeuralEngine])
     }
 }
